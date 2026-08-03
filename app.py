@@ -71,7 +71,7 @@ if api_key:
                 st.markdown("---")
                 st.markdown(resultado_ia)
                 
-                # Salvamento automático no Excel
+                # Salvamento automático no Excel com suporte total a acentos (engine openpyxl)
                 excel_file = "ordens_servico.xlsx"
                 data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                 
@@ -87,7 +87,8 @@ if api_key:
                 else:
                     df_final = nova_linha
                 
-                df_final.to_excel(excel_file, index=False)
+                # Salvando explicitamente com o motor openpyxl para evitar conflitos de codificação
+                df_final.to_excel(excel_file, index=False, engine='openpyxl')
                 st.success("📁 Dados salvos automaticamente no Excel com sucesso!")
                 
                 # Botão para descarregar o Excel atualizado
