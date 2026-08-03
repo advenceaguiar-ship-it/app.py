@@ -2,4 +2,4 @@ streamlit
 openai
 pandas
 openpyxl
-gtts
+from gtts import gTTS
