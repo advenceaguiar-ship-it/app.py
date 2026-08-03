@@ -2,8 +2,6 @@ import streamlit as st
 import openai
 import pandas as pd
 import os
-from gTTS import gTTS
-import base64
 
 # Configuração da página
 st.set_page_config(page_title="Assistente de Manutenção Industrial", page_icon="🔧", layout="wide")
@@ -43,7 +41,6 @@ if submitted:
     else:
         with st.spinner("Processando Ordem de Serviço com Inteligência Artificial..."):
             try:
-                # Chamada simples para a OpenAI gerar um resumo técnico estruturado
                 response = openai.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[
@@ -55,14 +52,6 @@ if submitted:
                 
                 st.success("Ordem de Serviço gerada com sucesso!")
                 st.write(resultado_ia)
-                
-                # Exemplo de uso do gTTS (geração de áudio sem erro de subprocesso)
-                tts = gTTS(text="Ordem de serviço gerada com sucesso.", lang="pt")
-                tts.save("resposta.mp3")
-                
-                audio_file = open("resposta.mp3", "rb")
-                audio_bytes = audio_file.read()
-                st.audio(audio_bytes, format="audio/mp3")
                 
             except Exception as e:
                 st.error(f"Ocorreu um erro ao processar: {e}")
