@@ -8,7 +8,7 @@ from datetime import datetime
 st.set_page_config(page_title="Assistente de Manutenção Industrial", page_icon="🔧", layout="wide")
 
 st.title("🔧 Assistente de Manutenção Industrial por Voz")
-st.write("Fale a sua ocorrência. O sistema transcreve, gera a Ordem de Serviço e salva automaticamente no Excel.")
+st.write("Fale a sua ocorrência. O sistema transcreve, gera a Ordem de Serviço formatada e salva automaticamente no Excel.")
 
 # Configuração da API da Groq
 if "GROQ_API_KEY" in st.secrets:
@@ -22,13 +22,22 @@ if api_key:
         base_url="https://api.groq.com/openai/v1"
     )
     
-    # Gravador de áudio direto (Zero-UI)
-    audio_file = st.audio_input("🎙️ Clique no microfone e relate o problema:")
+    # Histórico em memória e sincronizado com o Excel
+    if "historico_os" not in st.session_state:
+        st.session_state.historico_os = []
+        if os.path.exists("ordens_servico.xlsx"):
+            try:
+                df_load = pd.read_excel("ordens_servico.xlsx", engine="openpyxl")
+                st.session_state.historico_os = df_load.to_dict("records")
+            except:
+                pass
+
+    # Gravação por áudio direta (Zero-UI)
+    audio_file = st.audio_input("🎙️ Clique no microfone e relate a ocorrência:")
     
     if audio_file is not None:
-        with st.spinner("Processando áudio e gerando Ordem de Serviço..."):
+        with st.spinner("Processando áudio e estruturando a Ordem de Serviço..."):
             try:
-                # Salva o áudio temporariamente
                 temp_audio = "audio_temp.wav"
                 with open(temp_audio, "wb") as f:
                     f.write(audio_file.read())
@@ -44,63 +53,78 @@ if api_key:
                 if os.path.exists(temp_audio):
                     os.remove(temp_audio)
                 
-                st.info(f"🗣️ **Relato Captado:** {texto_relato}")
-
-                # Geração da Ordem de Serviço estruturada pela IA
+                # Geração da Ordem de Serviço PROFISSIONAL e FORMATADA pela IA
                 response = client.chat.completions.create(
                     model="llama-3.3-70b-versatile",
                     messages=[
                         {
                             "role": "system",
                             "content": (
-                                "Você é um especialista em manutenção industrial. "
-                                "Analise o relato falado do técnico e estruture uma Ordem de Serviço contendo: "
-                                "Equipamento, Problema Constatado, Ação Realizada e Peças/Materiais (se houver)."
+                                "Você é um especialista sênior em manutenção industrial. "
+                                "Analise o relato em áudio do técnico e estruture uma Ordem de Serviço formal, limpa e profissional, dividida obrigatoriamente nestes tópicos:\n"
+                                "- **Equipamento / Setor:**\n"
+                                "- **Problema Constatado / Sintoma:**\n"
+                                "- **Ação Realizada / Recomendada:**\n"
+                                "- **Peças e Materiais Utilizados:**\n"
+                                "Se faltar alguma informação fundamental no relato do técnico, adicione uma observação curta pedindo complemento."
                             )
                         },
                         {
                             "role": "user",
-                            "content": f"Relato: {texto_relato}"
+                            "content": f"Relato do técnico: {texto_relato}"
                         }
                     ]
                 )
                 
                 resultado_ia = response.choices[0].message.content
-                
-                st.success("Ordem de Serviço gerada com sucesso!")
-                st.markdown("---")
-                st.markdown(resultado_ia)
-                
-                # Salvamento automático no Excel com suporte total a acentos (engine openpyxl)
-                excel_file = "ordens_servico.xlsx"
                 data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                 
-                nova_linha = pd.DataFrame([{
+                # Adiciona ao histórico estruturado
+                nova_os = {
                     "Data/Hora": data_atual,
-                    "Relato Original": texto_relato,
-                    "Ordem de Serviço Gerada": resultado_ia
-                }])
+                    "Relato Falado": texto_relato,
+                    "Ordem de Serviço Formatada": resultado_ia
+                }
+                st.session_state.historico_os.insert(0, nova_os)
                 
-                if os.path.exists(excel_file):
-                    df_existente = pd.read_excel(excel_file)
-                    df_final = pd.concat([df_existente, nova_linha], ignore_index=True)
-                else:
-                    df_final = nova_linha
+                # Salvamento seguro em segundo plano no Excel (com suporte a openpyxl)
+                df_final = pd.DataFrame(st.session_state.historico_os)
+                df_final.to_excel("ordens_servico.xlsx", index=False, engine='openpyxl')
                 
-                # Salvando explicitamente com o motor openpyxl para evitar conflitos de codificação
-                df_final.to_excel(excel_file, index=False, engine='openpyxl')
-                st.success("📁 Dados salvos automaticamente no Excel com sucesso!")
-                
-                # Botão para descarregar o Excel atualizado
-                with open(excel_file, "rb") as f:
-                    st.download_button(
-                        label="📥 Descarregar Planilha Excel Atualizada",
-                        data=f,
-                        file_name="ordens_servico.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                st.success("Ordem de Serviço formatada e salva no Excel com sucesso!")
                 
             except Exception as e:
                 st.error(f"Ocorreu um erro ao processar: {e}")
+
+    # Tela de Histórico e Pesquisa por Setor/Serviço
+    st.divider()
+    st.subheader("📋 Histórico e Pesquisa de Ordens de Serviço")
+    
+    if st.session_state.historico_os:
+        termo_pesquisa = st.text_input("🔍 Pesquisar no histórico (por máquina, setor, serviço ou palavra-chave):")
+        
+        df_exibicao = pd.DataFrame(st.session_state.historico_os)
+        
+        if termo_pesquisa:
+            mask = df_exibicao.astype(str).apply(lambda x: x.str.contains(termo_pesquisa, case=False, na=False)).any(axis=1)
+            df_exibicao = df_exibicao[mask]
+        
+        for index, row in df_exibicao.iterrows():
+            with st.expander(f"📌 OS registrada em: {row['Data/Hora']}"):
+                st.markdown(f"**Relato Original:** _{row['Relato Falado']}_")
+                st.markdown("---")
+                st.markdown(row['Ordem de Serviço Formatada'])
+        
+        if os.path.exists("ordens_servico.xlsx"):
+            with open("ordens_servico.xlsx", "rb") as f:
+                st.download_button(
+                    label="📥 Baixar Planilha Excel Atualizada",
+                    data=f,
+                    file_name="ordens_servico.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+    else:
+        st.info("Nenhuma Ordem de Serviço registrada ainda. Grave o seu primeiro relato acima!")
+
 else:
     st.warning("⚠️ Insira a sua chave de API da Groq na barra lateral para começar.")
