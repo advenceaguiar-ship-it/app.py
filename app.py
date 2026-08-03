@@ -1,102 +1,71 @@
 import streamlit as st
 import openai
-import pandas as pd
 import os
 
 # Configuração da página
 st.set_page_config(page_title="Assistente de Manutenção Industrial", page_icon="🔧", layout="wide")
 
-# Título do aplicativo
 st.title("🔧 Assistente de Manutenção Industrial com IA")
-st.write("Grave o áudio da ocorrência ou digite o relato. A IA identificará os detalhes automaticamente.")
+st.write("Fale ou digite a sua ocorrência. O sistema gera a Ordem de Serviço de forma totalmente automática.")
 
-# Gerenciamento da chave da OpenAI API
-if "OPENAI_API_KEY" in st.secrets:
-    openai.api_key = st.secrets["OPENAI_API_KEY"]
+# Configuração da API da Groq (substituindo a OpenAI para aceitar chaves gsk_)
+if "GROQ_API_KEY" in st.secrets:
+    api_key = st.secrets["GROQ_API_KEY"]
 else:
-    api_key_input = st.sidebar.text_input("Insira sua OpenAI API Key", type="password")
-    if api_key_input:
-        openai.api_key = api_key_input
-    else:
-        st.sidebar.warning("Insira a API Key para habilitar a Inteligência Artificial.")
+    api_key = st.sidebar.text_input("Insira sua Groq API Key (gsk_...)", type="password")
 
-# Formulário simplificado (tudo automático)
-with st.form("form_os"):
-    st.subheader("Registro de Ocorrência")
+if api_key:
+    # A Groq usa a mesma estrutura da OpenAI, mas com a base URL própria
+    client = openai.OpenAI(
+        api_key=api_key,
+        base_url="https://api.groq.com/openai/v1"
+    )
     
-    metodo_registro = st.radio("Como deseja registrar a ocorrência?", ["Gravar Áudio", "Digitar Texto"], horizontal=True)
+    # Entrada de áudio ou texto de forma direta e automática
+    opcao = st.radio("Escolha o formato:", ["Gravar Áudio", "Digitar Texto"], horizontal=True)
     
-    audio_bytes = None
     texto_relato = ""
     
-    if metodo_registro == "Gravar Áudio":
-        st.write("🎙️ **Grave a sua mensagem de áudio:**")
-        audio_file = st.audio_input("Clique no microfone para gravar o relato:")
+    if opcao == "Gravar Áudio":
+        audio_file = st.audio_input("Grave o relato da ocorrência:")
         if audio_file is not None:
-            audio_bytes = audio_file.read()
-            st.success("Áudio gravado com sucesso!")
-    else:
-        texto_relato = st.text_area("Descreva o problema, o nome da máquina e o técnico envolvido:")
-        
-    submitted = st.form_submit_button("🚀 Gerar Ordem de Serviço Automática", use_container_width=True)
-
-# Processamento automático
-if submitted:
-    if not openai.api_key:
-        st.error("A chave da API da OpenAI não foi configurada.")
-    elif metodo_registro == "Gravar Áudio" and audio_bytes is None:
-        st.warning("Por favor, grave um áudio antes de enviar.")
-    elif metodo_registro == "Digitar Texto" and not texto_relato.strip():
-        st.warning("Por favor, digite o texto antes de enviar.")
-    else:
-        with st.spinner("Processando e organizando a Ordem de Serviço com Inteligência Artificial..."):
-            try:
-                relato_final = texto_relato
+            with st.spinner("Processando áudio automaticamente..."):
+                temp_audio = "audio_temp.wav"
+                with open(temp_audio, "wb") as f:
+                    f.write(audio_file.read())
                 
-                # Transcrição se for áudio
-                if metodo_registro == "Gravar Áudio" and audio_bytes:
-                    temp_audio_path = "temp_audio.wav"
-                    with open(temp_audio_path, "wb") as f:
-                        f.write(audio_bytes)
-                    
-                    with open(temp_audio_path, "rb") as file_to_transcribe:
-                        transcription = openai.audio.transcriptions.create(
-                            model="whisper-1", 
-                            file=file_to_transcribe
-                        )
-                    relato_final = transcription.text
-                    
-                    if os.path.exists(temp_audio_path):
-                        os.remove(temp_audio_path)
-                    
-                    st.info(f"🗣️ **O que foi captado no áudio:** {relato_final}")
+                with open(temp_audio, "rb") as f_audio:
+                    transcription = client.audio.transcriptions.create(
+                        model="whisper-large-v3",
+                        file=f_audio
+                    )
+                texto_relato = transcription.text
+                if os.path.exists(temp_audio):
+                    os.remove(temp_audio)
+                st.success(f"Áudio transcrito: {texto_relato}")
+    else:
+        texto_relato = st.text_area("Descreva a ocorrência:")
 
-                # Geração inteligente extraindo dados automaticamente do texto/áudio
-                response = openai.chat.completions.create(
-                    model="gpt-3.5-turbo",
+    # Assim que houver texto (seja por digitação ou áudio), gera automaticamente
+    if texto_relato:
+        with st.spinner("Gerando Ordem de Serviço automática com Inteligência Artificial..."):
+            try:
+                response = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
                     messages=[
                         {
-                            "role": "system", 
-                            "content": (
-                                "Você é um assistente especialista em manutenção industrial. "
-                                "Analise o relato livre do usuário, extraia ou deduza o nome da máquina/equipamento, "
-                                "o nome do técnico (se mencionado) e estruture uma Ordem de Serviço limpa com: "
-                                "1. Equipamento Identificado, 2. Técnico Responsável, 3. Diagnóstico do Problema, "
-                                "e 4. Ações Corretivas Recomendadas."
-                            )
+                            "role": "system",
+                            "content": "Você é um assistente de manutenção industrial. Crie uma Ordem de Serviço limpa e organizada com base no relato do técnico."
                         },
                         {
-                            "role": "user", 
-                            "content": f"Relato livre: {relato_final}"
+                            "role": "user",
+                            "content": f"Relato: {texto_relato}"
                         }
                     ]
                 )
-                
-                resultado_ia = response.choices[0].message.content
-                
-                st.success("Ordem de Serviço gerada com sucesso!")
-                st.markdown("---")
-                st.markdown(resultado_ia)
-                
+                st.markdown("### 📋 Ordem de Serviço Gerada:")
+                st.markdown(response.choices[0].message.content)
             except Exception as e:
-                st.error(f"Ocorreu um erro ao processar: {e}")
+                st.error(f"Erro ao gerar a IA: {e}")
+else:
+    st.warning("⚠️ Insira a sua chave de API da Groq na barra lateral para começar.")
