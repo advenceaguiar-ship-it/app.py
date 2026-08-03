@@ -1,126 +1,286 @@
 import streamlit as st
-import openai
-import os
+from openai import OpenAI
+import json
 import pandas as pd
+import os
 from datetime import datetime
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from gtts import gTTS
 
-# Configuração da página
-st.set_page_config(page_title="Assistente de Manutenção Industrial", page_icon="🔧", layout="wide")
+st.set_page_config(page_title="Assistente de Manutenção", layout="wide")
 
-st.title("🔧 Assistente de Manutenção Industrial por Voz")
-st.write("Fale o relato da ocorrência. A IA estrutura a Ordem de Serviço profissionalmente e salva de forma automática no Excel.")
+st.title("🛠️ Assistente de Manutenção Industrial (Zero-UI)")
+st.write("Fale com a IA. O relatório, tempo de serviço e checklist são validados automaticamente.")
 
-# Configuração da API da Groq
+# --- CONTROLE DE ESTADO BLINDADO ---
+if "etapa" not in st.session_state:
+    st.session_state.etapa = 1
+if "dados_parciais" not in st.session_state:
+    st.session_state.dados_parciais = {}
+if "texto_ia" not in st.session_state:
+    st.session_state.texto_ia = ""
+if "ja_processou" not in st.session_state:
+    st.session_state.ja_processou = False
+
+def reiniciar_os():
+    st.session_state.etapa = 1
+    st.session_state.dados_parciais = {}
+    st.session_state.texto_ia = ""
+    st.session_state.ja_processou = False
+    st.rerun()
+
+# --- CAMINHO DO EXCEL (ADAPTADO PARA FUNCIONAR NA NUVEM E NO PC) ---
+arquivo_excel = "relatorios_manutencao.xlsx"
+
+def salvar_excel_seguro(df_nova, caminho):
+    if not os.path.exists(caminho):
+        df_nova.to_excel(caminho, index=False)
+    else:
+        try:
+            df_existente = pd.read_excel(caminho)
+            df_final = pd.concat([df_existente, df_nova], ignore_index=True)
+            df_final.to_excel(caminho, index=False)
+        except PermissionError:
+            caminho_alt = caminho.replace(".xlsx", "_copia_segura.xlsx")
+            df_nova.to_excel(caminho_alt, index=False)
+            st.warning(f"⚠️ O Excel principal está aberto. Salvo temporariamente em: {caminho_alt}")
+            return
+
+    try:
+        wb = openpyxl.load_workbook(caminho)
+        ws = wb.active
+        header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        header_font = Font(name="Arial", size=11, bold=True, color="FFFFFF")
+        align_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        align_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        thin_border = Border(left=Side(style='thin', color='D9D9D9'), right=Side(style='thin', color='D9D9D9'), top=Side(style='thin', color='D9D9D9'), bottom=Side(style='thin', color='D9D9D9'))
+
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = align_center
+
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+            for cell in row:
+                cell.font = Font(name="Arial", size=10)
+                cell.border = thin_border
+                if cell.column in [1, 2, 3, 4]: 
+                    cell.alignment = align_center
+                else:
+                    cell.alignment = align_left
+
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or '')) for cell in col)
+            col_letter = get_column_letter(col[0].column)
+            ws.column_dimensions[col_letter].width = max(max_len + 4, 15)
+        ws.row_dimensions[1].height = 28
+        wb.save(caminho)
+    except Exception:
+        pass
+
+# --- BARRA LATERAL (CONFIGURAÇÕES E FILTROS DE PESQUISA) ---
+st.sidebar.header("⚙️ Configurações & Filtros")
+
+# Carrega a API Key do Streamlit Secrets se houver, senão pede na barra lateral
 if "GROQ_API_KEY" in st.secrets:
-    api_key = st.secrets["GROQ_API_KEY"]
+    raw_key = st.secrets["GROQ_API_KEY"]
 else:
-    api_key = st.sidebar.text_input("Insira sua Groq API Key (gsk_...)", type="password")
+    raw_key = st.sidebar.text_input("Cole a sua API Key da Groq:", type="password")
 
-if api_key:
-    client = openai.OpenAI(
-        api_key=api_key,
-        base_url="https://api.groq.com/openai/v1"
-    )
+st.sidebar.divider()
+st.sidebar.subheader("🔍 Filtrar Ordens de Serviço")
+filtro_tipo = st.sidebar.selectbox("Filtrar por Tipo de Serviço:", ["Todos", "Elétrico", "Mecânico", "Resina"])
+filtro_setor = st.sidebar.text_input("Filtrar por Setor (Ex: Cobre, Ferro, Usinagem):")
+
+if raw_key:
+    api_key = raw_key.strip()
+    client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
     
-    # Nome fixo do arquivo Excel na pasta do projeto
-    excel_file = "ordens_servico.xlsx"
+    if st.sidebar.button("🔄 Cancelar / Iniciar Nova O.S."):
+        reiniciar_os()
 
-    # Carrega histórico inicial do Excel ou da sessão
-    if "historico_os" not in st.session_state:
-        st.session_state.historico_os = []
-        if os.path.exists(excel_file):
-            try:
-                df_load = pd.read_excel(excel_file, engine="openpyxl")
-                st.session_state.historico_os = df_load.to_dict("records")
-            except:
-                pass
+    # ==========================================
+    # ETAPA 1: RELATO INICIAL
+    # ==========================================
+    if st.session_state.etapa == 1:
+        st.subheader("Fase 1: Descreva o problema, serviço e tempo gasto")
+        
+        audio_file = st.audio_input("Clique para gravar seu relato inicial:")
 
-    # Gravação por áudio direta (Zero-UI)
-    audio_file = st.audio_input("🎙️ Clique no microfone e relate a ocorrência:")
-    
-    if audio_file is not None:
-        with st.spinner("Processando áudio e estruturando a Ordem de Serviço..."):
-            try:
-                temp_audio = "audio_temp.wav"
-                with open(temp_audio, "wb") as f:
-                    f.write(audio_file.read())
+        if audio_file is not None and not st.session_state.ja_processou:
+            st.session_state.ja_processou = True
+            
+            with st.spinner("Analisando relato e preenchendo dados..."):
+                transcript = client.audio.transcriptions.create(model="whisper-large-v3", file=audio_file)
                 
-                # Transcrição via Whisper (Groq)
-                with open(temp_audio, "rb") as f_audio:
-                    transcription = client.audio.transcriptions.create(
-                        model="whisper-large-v3",
-                        file=f_audio
-                    )
-                texto_relato = transcription.text
+                prompt = f"""Analise o relato do técnico e extraia em formato JSON exatamente com as chaves:
+                - tipo_servico (Estritamente: 'Elétrico', 'Mecânico' ou 'Resina'. Se não se enquadrar, coloque 'Não informada')
+                - setor (Inicie com letra maiúscula)
+                - equipamento (Inicie com letra maiúscula)
+                - falha (Escreva formalmente, iniciando com letra maiúscula)
+                - causa (Se o técnico mencionou a causa, preencha formatando corretamente. Senão, coloque 'Não informada')
+                - acao (Escreva formalmente, iniciando com letra maiúscula)
+                - tempo_gasto (Ex: '7h às 8h', '40 minutos', '2 horas'. Se não citar, coloque 'Não informado')
+                - checklist_seguranca (Analise se o técnico informou no áudio se deixou o setor limpo, seguro, deu baixa, guardou ferramentas e testou. Se disse que fez tudo, preencha 'Concluído no relato'. Senão, 'Pendente')
                 
-                if os.path.exists(temp_audio):
-                    os.remove(temp_audio)
+                Texto do técnico: {transcript.text}"""
                 
-                # Geração da Ordem de Serviço estruturada e formatada profissionalmente
                 response = client.chat.completions.create(
                     model="llama-3.3-70b-versatile",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "Você é um especialista sênior em manutenção industrial. "
-                                "Analise o relato falado do técnico e estruture uma Ordem de Serviço limpa, formal e profissional, "
-                                "dividida obrigatoriamente nestes tópicos:\n"
-                                "- **Equipamento / Setor:**\n"
-                                "- **Problema Constatado:**\n"
-                                "- **Ação Realizada / Recomendada:**\n"
-                                "- **Peças e Materiais:**\n"
-                                "Se faltar alguma informação essencial, adicione um aviso curto no final."
-                            )
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Relato do técnico: {texto_relato}"
-                        }
-                    ]
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"}
                 )
                 
-                resultado_ia = response.choices[0].message.content
-                data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                dados = json.loads(response.choices[0].message.content)
+                st.session_state.dados_parciais = dados
                 
-                # Adiciona ao topo do histórico da sessão
+                causa_ok = dados.get("causa") != 'Não informada'
+                checklist_ok = dados.get("checklist_seguranca") == 'Concluído no relato'
+                
+                if causa_ok and checklist_ok:
+                    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+                    num_os = 1
+                    if os.path.exists(arquivo_excel):
+                        try:
+                            df_existente = pd.read_excel(arquivo_excel)
+                            num_os = len(df_existente) + 1
+                        except:
+                            pass
+                    
+                    nova_os = {
+                        "Nº O.S.": f"OS-{num_os:03d}",
+                        "Data/Hora": agorai if 'agora' in locals() else datetime.now().strftime("%d/%m/%Y %H:%M"),
+                        "Tipo de Serviço": dados.get("tipo_servico", "Não informada"),
+                        "Setor / Área": dados.get("setor", "Não informada"),
+                        "Equipamento": dados.get("equipamento", "Não informada"),
+                        "Falha Relatada": dados.get("falha", "Não informada"),
+                        "Causa Raiz": dados.get("causa", "Não informada"),
+                        "Ação Tomada": dados.get("acao", "Não informada"),
+                        "Tempo Gasto": dados.get("tempo_gasto", "Não informado"),
+                        "Checklist & Limpeza": "Tudo OK (Informado no relato inicial)"
+                    }
+
+                    df_nova = pd.DataFrame([nova_os])
+                    salvar_excel_seguro(df_nova, arquivo_excel)
+                    
+                    st.success("✅ Relatório 100% completo! Salvo no Excel com sucesso.")
+                    st.balloons()
+                    import time
+                    time.sleep(2)
+                    reiniciar_os()
+                else:
+                    texto_fala = "Relatório parcial capturado. "
+                    if not causa_ok:
+                        texto_fala += "Por favor, informe a causa raiz do problema. "
+                    texto_fala += "Confirme também o checklist: o setor foi limpo, o serviço está seguro, deu baixa no almoxarifado, guardou ferramentas e testou? Grave sua resposta."
+
+                    tts = gTTS(text=texto_fala, lang='pt')
+                    tts.save("pergunta_ia.mp3")
+                    
+                    st.session_state.texto_ia = texto_fala
+                    st.session_state.etapa = 2
+                    st.rerun()
+
+    # ==========================================
+    # ETAPA 2: COMPLEMENTO POR VOZ
+    # ==========================================
+    elif st.session_state.etapa == 2:
+        st.subheader("Fase 2: Complemento de Causa e Checklist de Segurança")
+        st.warning(f"🤖 **A IA está perguntando:** {st.session_state.texto_ia}")
+        
+        if os.path.exists("pergunta_ia.mp3"):
+            st.audio("pergunta_ia.mp3", format="audio/mp3")
+        
+        audio_resposta = st.audio_input("Grave sua resposta para concluir:")
+
+        if audio_resposta is not None and not st.session_state.ja_processou:
+            st.session_state.ja_processou = True
+            
+            with st.spinner("Processando e salvando no Excel..."):
+                transcript2 = client.audio.transcriptions.create(model="whisper-large-v3", file=audio_resposta)
+                
+                prompt_final = f"""
+                JSON original: {json.dumps(st.session_state.dados_parciais)}
+                Resposta complementar do técnico: {transcript2.text}
+                
+                Tarefa 1: Preencha o campo 'causa' formatando com primeira letra maiúscula se estiver 'Não informada'.
+                Tarefa 2: Crie a chave 'checklist_seguranca' consolidando a situação (Limpeza, segurança, baixa no almoxarifado, ferramentas e teste) formatado e correto.
+                Retorne apenas o JSON final atualizado.
+                """
+                
+                response_final = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[{"role": "user", "content": prompt_final}],
+                    response_format={"type": "json_object"}
+                )
+                
+                dados_finais = json.loads(response_final.choices[0].message.content)
+                
+                agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+                num_os = 1
+                if os.path.exists(arquivo_excel):
+                    try:
+                        df_existente = pd.read_excel(arquivo_excel)
+                        num_os = len(df_existente) + 1
+                    except:
+                        pass
+                
                 nova_os = {
-                    "Data/Hora": data_atual,
-                    "Relato Falado (Áudio)": texto_relato,
-                    "Ordem de Serviço Formatada": resultado_ia
+                    "Nº O.S.": f"OS-{num_os:03d}",
+                    "Data/Hora": agora,
+                    "Tipo de Serviço": dados_finais.get("tipo_servico", "Não informada"),
+                    "Setor / Área": dados_finais.get("setor", "Não informada"),
+                    "Equipamento": dados_finais.get("equipamento", "Não informada"),
+                    "Falha Relatada": dados_finais.get("falha", "Não informada"),
+                    "Causa Raiz": dados_finais.get("causa", "Não informada"),
+                    "Ação Tomada": dados_finais.get("acao", "Não informada"),
+                    "Tempo Gasto": dados_finais.get("tempo_gasto", "Não informado"),
+                    "Checklist & Limpeza": dados_finais.get("checklist_seguranca", "Concluído via voz")
                 }
-                st.session_state.historico_os.insert(0, nova_os)
-                
-                # Salvamento automático direto no Excel em segundo plano (sem corromper)
-                df_final = pd.DataFrame(st.session_state.historico_os)
-                df_final.to_excel(excel_file, index=False, engine='openpyxl')
-                
-                st.success("Ordem de Serviço gerada e salva automaticamente na pasta do Excel!")
-                
-            except Exception as e:
-                st.error(f"Ocorreu um erro ao processar: {e}")
 
-    # Exibição da Tabela e Pesquisa integrada no site
+                df_nova = pd.DataFrame([nova_os])
+                salvar_excel_seguro(df_nova, arquivo_excel)
+                
+                st.success("✅ Ordem de serviço finalizada e salva com sucesso no Excel!")
+                st.balloons()
+                
+                import time
+                time.sleep(2)
+                reiniciar_os()
+
+    # --- HISTÓRICO COM FILTROS DE PESQUISA MELHORADOS ---
     st.divider()
-    st.subheader("📋 Histórico e Pesquisa de Ordens de Serviço")
+    st.subheader("📋 Histórico de Ordens de Serviço (Filtrado)")
     
-    if st.session_state.historico_os:
-        termo_pesquisa = st.text_input("🔍 Pesquisar no histórico (por máquina, setor, serviço ou palavra-chave):")
-        
-        df_exibicao = pd.DataFrame(st.session_state.historico_os)
-        
-        if termo_pesquisa:
-            mask = df_exibicao.astype(str).apply(lambda x: x.str.contains(termo_pesquisa, case=False, na=False)).any(axis=1)
-            df_exibicao = df_exibicao[mask]
-        
-        # Mostra as ordens formatadas no site de forma limpa
-        for index, row in df_exibicao.iterrows():
-            with st.expander(f"📌 OS registrada em: {row['Data/Hora']}"):
-                st.markdown(f"**Relato Original:** _{row['Relato Falado (Áudio)']}_")
-                st.markdown("---")
-                st.markdown(row['Ordem de Serviço Formatada'])
+    if os.path.exists(arquivo_excel):
+        try:
+            df_historico = pd.read_excel(arquivo_excel)
+            df_filtrado = df_historico.copy()
+            
+            # Filtro por Tipo
+            if filtro_tipo != "Todos":
+                df_filtrado = df_filtrado[df_filtrado["Tipo de Serviço"].astype(str).str.contains(filtro_tipo, case=False, na=False)]
+                
+            # Filtro por Setor
+            if filtro_setor.strip():
+                termo_busca = filtro_setor.strip()
+                df_filtrado = df_filtrado[df_filtrado["Setor / Área"].astype(str).str.contains(termo_busca, case=False, na=False)]
+                
+            st.dataframe(df_filtrado, use_container_width=True)
+            
+            # Botão para download direto da planilha gerada
+            with open(arquivo_excel, "rb") as f:
+                st.download_button(
+                    label="📥 Baixar Planilha Excel Atualizada",
+                    data=f,
+                    file_name="relatorios_manutencao.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+        except Exception:
+            st.write("A planilha está aberta no Excel. Feche-a temporariamente se quiser visualizar o histórico na tela.")
     else:
-        st.info("Nenhuma Ordem de Serviço registrada ainda. Grave o seu primeiro relato acima!")
-
+        st.write("Nenhuma O.S. gravada ainda.")
 else:
     st.warning("⚠️ Insira a sua chave de API da Groq na barra lateral para começar.")
