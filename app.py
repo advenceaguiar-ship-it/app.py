@@ -7,8 +7,6 @@ from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from gtts import gTTS
-import io
 
 st.set_page_config(page_title="Assistente de Manutenção", layout="wide")
 
@@ -22,8 +20,6 @@ if "dados_parciais" not in st.session_state:
     st.session_state.dados_parciais = {}
 if "texto_ia" not in st.session_state:
     st.session_state.texto_ia = ""
-if "audio_bytes_ia" not in st.session_state:
-    st.session_state.audio_bytes_ia = None
 if "ja_processou" not in st.session_state:
     st.session_state.ja_processou = False
 
@@ -31,11 +27,10 @@ def reiniciar_os():
     st.session_state.etapa = 1
     st.session_state.dados_parciais = {}
     st.session_state.texto_ia = ""
-    st.session_state.audio_bytes_ia = None
     st.session_state.ja_processou = False
     st.rerun()
 
-# --- CAMINHO DO EXCEL SEGURO (NUVEM E PC) ---
+# --- CAMINHO DO EXCEL (ADAPTADO PARA NUVEM E PC) ---
 arquivo_excel = "relatorios_manutencao.xlsx"
 
 def salvar_excel_seguro(df_nova, caminho):
@@ -177,38 +172,25 @@ if raw_key:
                     texto_fala = "Relatório parcial capturado. "
                     if not causa_ok:
                         texto_fala += "Por favor, informe a causa raiz do problema. "
-                    texto_fala += "Confirme também o checklist: o setor foi limpo, o serviço está seguro, deu baixa no almoxarifado, guardou ferramentas e testou? Grave sua resposta."
-
-                    # Tratamento blindado para gerar o áudio em memória sem travar
-                    try:
-                        tts = gTTS(text=texto_fala, lang='pt')
-                        fp = io.BytesIO()
-                        tts.write_to_fp(fp)
-                        fp.seek(0)
-                        st.session_state.audio_bytes_ia = fp.read()
-                    except Exception:
-                        st.session_state.audio_bytes_ia = None
+                    texto_fala += "Confirme também o checklist: o setor foi limpo, o serviço está seguro, deu baixa no almoxarifado, guardou ferramentas e testou? Grave sua resposta abaixo."
 
                     st.session_state.texto_ia = texto_fala
                     st.session_state.etapa = 2
                     st.rerun()
 
     # ==========================================
-    # ETAPA 2: COMPLEMENTO POR VOZ
+    # ETAPA 2: COMPLEMENTO POR VOZ (FLUXO FLUIDO E DIRETO)
     # ==========================================
     elif st.session_state.etapa == 2:
         st.subheader("Fase 2: Complemento de Causa e Checklist de Segurança")
-        st.warning(f"🤖 **A IA está perguntando:** {st.session_state.texto_ia}")
+        st.info(f"🤖 **A IA solicita complemento:** {st.session_state.texto_ia}")
         
-        if st.session_state.audio_bytes_ia is not None:
-            st.audio(st.session_state.audio_bytes_ia, format="audio/mp3", autoplay=True)
-        
-        audio_resposta = st.audio_input("Grave sua resposta para concluir:")
+        audio_resposta = st.audio_input("Grave sua resposta complementar para concluir:")
 
         if audio_resposta is not None and not st.session_state.ja_processou:
             st.session_state.ja_processou = True
             
-            with st.spinner("Processando e salvando no Excel..."):
+            with st.spinner("Processando complemento e salvando no Excel..."):
                 transcript2 = client.audio.transcriptions.create(model="whisper-large-v3", file=audio_resposta)
                 
                 prompt_final = f"""
