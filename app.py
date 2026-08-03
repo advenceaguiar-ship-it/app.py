@@ -35,7 +35,7 @@ def reiniciar_os():
     st.session_state.ja_processou = False
     st.rerun()
 
-# --- CAMINHO DO EXCEL (ADAPTADO PARA A NUVEM E PC) ---
+# --- CAMINHO DO EXCEL SEGURO (NUVEM E PC) ---
 arquivo_excel = "relatorios_manutencao.xlsx"
 
 def salvar_excel_seguro(df_nova, caminho):
@@ -167,6 +167,126 @@ if raw_key:
 
                     df_nova = pd.DataFrame([nova_os])
                     salvar_excel_seguro(df_nova, arquivo_excel)
+                    
+                    st.success("✅ Relatório 100% completo! Salvo no Excel com sucesso.")
+                    st.balloons()
+                    import time
+                    time.sleep(2)
+                    reiniciar_os()
+                else:
+                    texto_fala = "Relatório parcial capturado. "
+                    if not causa_ok:
+                        texto_fala += "Por favor, informe a causa raiz do problema. "
+                    texto_fala += "Confirme também o checklist: o setor foi limpo, o serviço está seguro, deu baixa no almoxarifado, guardou ferramentas e testou? Grave sua resposta."
+
+                    # Tratamento blindado para gerar o áudio em memória sem travar
+                    try:
+                        tts = gTTS(text=texto_fala, lang='pt')
+                        fp = io.BytesIO()
+                        tts.write_to_fp(fp)
+                        fp.seek(0)
+                        st.session_state.audio_bytes_ia = fp.read()
+                    except Exception:
+                        st.session_state.audio_bytes_ia = None
+
+                    st.session_state.texto_ia = texto_fala
+                    st.session_state.etapa = 2
+                    st.rerun()
+
+    # ==========================================
+    # ETAPA 2: COMPLEMENTO POR VOZ
+    # ==========================================
+    elif st.session_state.etapa == 2:
+        st.subheader("Fase 2: Complemento de Causa e Checklist de Segurança")
+        st.warning(f"🤖 **A IA está perguntando:** {st.session_state.texto_ia}")
+        
+        if st.session_state.audio_bytes_ia is not None:
+            st.audio(st.session_state.audio_bytes_ia, format="audio/mp3", autoplay=True)
+        
+        audio_resposta = st.audio_input("Grave sua resposta para concluir:")
+
+        if audio_resposta is not None and not st.session_state.ja_processou:
+            st.session_state.ja_processou = True
+            
+            with st.spinner("Processando e salvando no Excel..."):
+                transcript2 = client.audio.transcriptions.create(model="whisper-large-v3", file=audio_resposta)
+                
+                prompt_final = f"""
+                JSON original: {json.dumps(st.session_state.dados_parciais)}
+                Resposta complementar do técnico: {transcript2.text}
+                
+                Tarefa 1: Preencha o campo 'causa' formatando com primeira letra maiúscula se estiver 'Não informada'.
+                Tarefa 2: Crie a chave 'checklist_seguranca' consolidando a situação (Limpeza, segurança, baixa no almoxarifado, ferramentas e teste) formatado e correto.
+                Retorne apenas o JSON final atualizado.
+                """
+                
+                response_final = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[{"role": "user", "content": prompt_final}],
+                    response_format={"type": "json_object"}
+                )
+                
+                dados_finais = json.loads(response_final.choices[0].message.content)
+                
+                agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+                num_os = 1
+                if os.path.exists(arquivo_excel):
+                    try:
+                        df_existente = pd.read_excel(arquivo_excel)
+                        num_os = len(df_existente) + 1
+                    except:
+                        pass
+                
+                nova_os = {
+                    "Nº O.S.": f"OS-{num_os:03d}",
+                    "Data/Hora": agora,
+                    "Tipo de Serviço": dados_finais.get("tipo_servico", "Não informada"),
+                    "Setor / Área": dados_finais.get("setor", "Não informada"),
+                    "Equipamento": dados_finais.get("equipamento", "Não informada"),
+                    "Falha Relatada": dados_finais.get("falha", "Não informada"),
+                    "Causa Raiz": dados_finais.get("causa", "Não informada"),
+                    "Ação Tomada": dados_finais.get("acao", "Não informada"),
+                    "Tempo Gasto": dados_finais.get("tempo_gasto", "Não informado"),
+                    "Checklist & Limpeza": dados_finais.get("checklist_seguranca", "Concluído via voz")
+                }
+
+                df_nova = pd.DataFrame([nova_os])
+                salvar_excel_seguro(df_nova, arquivo_excel)
+                
+                st.success("✅ Ordem de serviço finalizada e salva com sucesso no Excel!")
+                st.balloons()
+                
+                import time
+                time.sleep(2)
+                reiniciar_os()
+
+    # --- HISTÓRICO COM FILTROS DE PESQUISA ---
+    st.divider()
+    st.subheader("📋 Histórico de Ordens de Serviço (Filtrado)")
+    
+    if os.path.exists(arquivo_excel):
+        try:
+            df_historico = pd.read_excel(arquivo_excel)
+            df_filtrado = df_historico.copy()
+            
+            if filtro_tipo != "Todos":
+                df_filtrado = df_filtrado[df_filtrado["Tipo de Serviço"].astype(str).str.contains(filtro_tipo, case=False, na=False)]
+                
+            if filtro_setor.strip():
+                termo_busca = filtro_setor.strip()
+                df_filtrado = df_filtrado[df_filtrado["Setor / Área"].astype(str).str.contains(termo_busca, case=False, na=False)]
+                
+            st.dataframe(df_filtrado, use_container_width=True)
+            
+            with open(arquivo_excel, "rb") as f:
+                st.download_button(
+                    label="📥 Baixar Planilha Excel Atualizada",
+                    data=f,
+                    file_name="relatorios_manutencao.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+        except Exception:
+            st.write("A planilha está aberta no Excel. Feche-a temporariamente se quiser visualizar o histórico na tela.")
     else:
         st.write("Nenhuma O.S. gravada ainda.")
 else:
