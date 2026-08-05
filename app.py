@@ -32,7 +32,7 @@ def reiniciar_os():
     st.session_state.audio_bytes_ia = None
     st.rerun()
 
-# --- CAMINHO DO EXCEL SEGURO ---
+# --- CAMINHO DO EXCEL NA NUVEM ---
 arquivo_excel = "relatorios_manutencao.xlsx"
 
 def salvar_excel_seguro(df_nova, caminho):
@@ -43,11 +43,8 @@ def salvar_excel_seguro(df_nova, caminho):
             df_existente = pd.read_excel(caminho)
             df_final = pd.concat([df_existente, df_nova], ignore_index=True)
             df_final.to_excel(caminho, index=False)
-        except PermissionError:
-            caminho_alt = caminho.replace(".xlsx", "_copia_segura.xlsx")
-            df_nova.to_excel(caminho_alt, index=False)
-            st.warning(f"⚠️ O Excel principal está aberto. Salvo temporariamente em: {caminho_alt}")
-            return
+        except Exception:
+            pass
 
     try:
         wb = openpyxl.load_workbook(caminho)
@@ -110,12 +107,14 @@ if raw_key:
         audio_file = st.audio_input("Clique no microfone para gravar:")
 
         if audio_file is not None:
-            st.info("🎙️ Áudio capturado com sucesso! Clique no botão abaixo para processar e gerar o relatório.")
-            
-            if st.button("🚀 Processar Relatório Falado", type="primary"):
-                with st.spinner("Transcrevendo e analisando dados com IA..."):
-                    transcript = client.audio.transcriptions.create(model="whisper-large-v3", file=audio_file)
-                    
+            with st.spinner("Analisando áudio..."):
+                transcript = client.audio.transcriptions.create(model="whisper-large-v3", file=audio_file)
+                texto_transcrito = transcript.text.strip()
+                
+                # VALIDAÇÃO CONTRA ÁUDIO VAZIO
+                if len(texto_transcrito) < 5:
+                    st.error("⚠️ Nenhum relato válido detectado no áudio. Por favor, grave novamente detalhando a ocorrência.")
+                else:
                     prompt = f"""Analise o relato do técnico e extraia em formato JSON exatamente com as chaves:
                     - tipo_servico (Estritamente: 'Elétrico', 'Mecânico' ou 'Resina'. Se não se enquadrar, coloque 'Não informada')
                     - setor (Inicie com letra maiúscula)
@@ -126,7 +125,7 @@ if raw_key:
                     - tempo_gasto (Ex: '7h às 8h', '40 minutos', '2 horas'. Se não citar, coloque 'Não informado')
                     - checklist_seguranca (Analise se o técnico informou no áudio se deixou o setor limpo, seguro, deu baixa, guardou ferramentas e testou. Se disse que fez tudo, preencha 'Concluído no relato'. Senão, 'Pendente')
                     
-                    Texto do técnico: {transcript.text}"""
+                    Texto do técnico: {texto_transcrito}"""
                     
                     response = client.chat.completions.create(
                         model="llama-3.3-70b-versatile",
@@ -205,15 +204,16 @@ if raw_key:
         audio_resposta = st.audio_input("Grave sua resposta complementar:")
 
         if audio_resposta is not None:
-            st.info("🎙️ Resposta gravada! Clique no botão abaixo para concluir a O.S.")
-            
-            if st.button("🚀 Enviar Resposta e Finalizar O.S.", type="primary"):
-                with st.spinner("Processando complemento e salvando no Excel..."):
-                    transcript2 = client.audio.transcriptions.create(model="whisper-large-v3", file=audio_resposta)
-                    
+            with st.spinner("Processando complemento..."):
+                transcript2 = client.audio.transcriptions.create(model="whisper-large-v3", file=audio_resposta)
+                texto_resp2 = transcript2.text.strip()
+                
+                if len(texto_resp2) < 3:
+                    st.error("⚠️ Resposta vazia detectada. Por favor, grave o complemento novamente.")
+                else:
                     prompt_final = f"""
                     JSON original: {json.dumps(st.session_state.dados_parciais)}
-                    Resposta complementar do técnico: {transcript2.text}
+                    Resposta complementar do técnico: {texto_resp2}
                     
                     Tarefa 1: Preencha o campo 'causa' formatando com primeira letra maiúscula se estiver 'Não informada'.
                     Tarefa 2: Crie a chave 'checklist_seguranca' consolidando a situação (Limpeza, segurança, baixa no almoxarifado, ferramentas e teste) formatado e correto.
@@ -286,7 +286,7 @@ if raw_key:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
         except Exception:
-            st.write("A planilha está aberta no Excel. Feche-a temporariamente se quiser visualizar o histórico na tela.")
+            st.write("A planilha está temporariamente ocupada. Tente novamente em instantes.")
     else:
         st.write("Nenhuma O.S. gravada ainda.")
 
