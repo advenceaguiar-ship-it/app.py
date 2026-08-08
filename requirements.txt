@@ -3,3 +3,5 @@ openai
 pandas
 openpyxl
 gtts
+google-auth
+google-api-python-client
