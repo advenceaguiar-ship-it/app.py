@@ -10,6 +10,11 @@ from openpyxl.utils import get_column_letter
 from gtts import gTTS
 import io
 
+# --- BIBLIOTECAS PARA O GOOGLE DRIVE ---
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
 st.set_page_config(page_title="Assistente de Manutenção", layout="wide")
 
 st.title("🛠️ Assistente de Manutenção Industrial (Zero-UI)")
@@ -32,8 +37,46 @@ def reiniciar_os():
     st.session_state.audio_bytes_ia = None
     st.rerun()
 
-# --- CAMINHO DO EXCEL NA NUVEM ---
+# --- CAMINHO DO EXCEL LOCAL ---
 arquivo_excel = "relatorios_manutencao.xlsx"
+
+# --- 2. INTEGRAÇÃO COM GOOGLE DRIVE ---
+def enviar_para_google_drive(caminho_arquivo):
+    """Envia ou atualiza o arquivo Excel automaticamente no Google Drive usando Secrets."""
+    try:
+        if "gcp_service_account" not in st.secrets or "GOOGLE_DRIVE_FOLDER_ID" not in st.secrets:
+            return False # Sem credenciais configuradas na nuvem, ignora o envio sem travar o app
+
+        # Carrega credenciais do Streamlit Secrets
+        cred_dict = dict(st.secrets["gcp_service_account"])
+        SCOPES = ['https://www.googleapis.com/auth/drive']
+        creds = Credentials.from_service_account_info(cred_dict, scopes=SCOPES)
+        service = build('drive', 'v3', credentials=creds)
+
+        folder_id = st.secrets["GOOGLE_DRIVE_FOLDER_ID"]
+
+        # Verifica se o arquivo já existe no Drive para atualizar (evitar duplicados)
+        query = f"name='{os.path.basename(caminho_arquivo)}' and '{folder_id}' in parents and trashed=false"
+        results = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
+        files = results.get('files', [])
+
+        media = MediaFileUpload(caminho_arquivo, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+        if files:
+            # Atualiza o arquivo existente
+            file_id = files[0]['id']
+            service.files().update(fileId=file_id, media_body=media).execute()
+        else:
+            # Cria novo arquivo na pasta específica
+            file_metadata = {
+                'name': os.path.basename(caminho_arquivo),
+                'parents': [folder_id]
+            }
+            service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        return True
+    except Exception as e:
+        print(f"Erro ao sincronizar com o Drive: {e}")
+        return False
 
 def salvar_excel_seguro(df_nova, caminho):
     if not os.path.exists(caminho):
@@ -64,7 +107,7 @@ def salvar_excel_seguro(df_nova, caminho):
             for cell in row:
                 cell.font = Font(name="Arial", size=10)
                 cell.border = thin_border
-                if cell.column in [1, 2, 3, 4]: 
+                if cell.column in [1, 2, 3, 4, 5]: 
                     cell.alignment = align_center
                 else:
                     cell.alignment = align_left
@@ -75,11 +118,24 @@ def salvar_excel_seguro(df_nova, caminho):
             ws.column_dimensions[col_letter].width = max(max_len + 4, 15)
         ws.row_dimensions[1].height = 28
         wb.save(caminho)
+        
+        # Dispara sincronização automática com o Google Drive
+        enviar_para_google_drive(caminho)
     except Exception:
         pass
 
-# --- BARRA LATERAL (CONFIGURAÇÕES E FILTROS) ---
-st.sidebar.header("⚙️ Configurações & Filtros")
+# --- 4. MEMÓRIA DE EQUIPAMENTOS POR SETOR (BASE DE DADOS) ---
+EQUIPAMENTOS_CADastrados = {
+    "Cobre": ["Torno CNC 01", "Prensa Hidráulica 03", "Extrusora Principal"],
+    "Ferro": ["Ponte Rolante 02", "Forno de Indução", "Cortadeira de Chapas"],
+    "Usinagem": ["Centro de Usinagem DMG", "Retífica Plana", "Fresadora Universal"]
+}
+
+# --- BARRA LATERAL (CONFIGURAÇÕES, AUTENTICAÇÃO E FILTROS) ---
+st.sidebar.header("⚙️ Configurações & Identificação")
+
+# 2. AUTENTICAÇÃO DE TÉCNICOS
+tecnico_nome = st.sidebar.text_input("👷 Nome do Técnico Responsável:", placeholder="Ex: Carlos Silva")
 
 if "GROQ_API_KEY" in st.secrets:
     raw_key = st.secrets["GROQ_API_KEY"]
@@ -89,9 +145,13 @@ else:
 st.sidebar.divider()
 st.sidebar.subheader("🔍 Filtrar Ordens de Serviço")
 filtro_tipo = st.sidebar.selectbox("Filtrar por Tipo de Serviço:", ["Todos", "Elétrico", "Mecânico", "Resina"])
-filtro_setor = st.sidebar.text_input("Filtrar por Setor (Ex: Cobre, Ferro, Usinagem):")
+filtro_setor = st.sidebar.text_input("Filtrar por Setor:")
 
 if raw_key:
+    if not tecnico_nome.strip():
+        st.warning("⚠️ Por favor, digite o seu nome na barra lateral para registrar as ordens de serviço.")
+        st.stop()
+
     api_key = raw_key.strip()
     client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
     
@@ -102,7 +162,7 @@ if raw_key:
     # ETAPA 1: RELATO INICIAL
     # ==========================================
     if st.session_state.etapa == 1:
-        st.subheader("Fase 1: Descreva o problema, serviço e tempo gasto")
+        st.subheader(f"Fase 1: Olá, {tecnico_nome}. Descreva o problema, serviço e tempo gasto")
         
         audio_file = st.audio_input("Clique no microfone para gravar:")
 
@@ -111,14 +171,13 @@ if raw_key:
                 transcript = client.audio.transcriptions.create(model="whisper-large-v3", file=audio_file)
                 texto_transcrito = transcript.text.strip()
                 
-                # VALIDAÇÃO CONTRA ÁUDIO VAZIO
-                if len(texto_transcrito) < 5:
-                    st.error("⚠️ Nenhum relato válido detectado no áudio. Por favor, grave novamente detalhando a ocorrência.")
+                if len(texto_transcrito) < 2:
+                    st.error("⚠️ Áudio muito curto ou vazio. Por favor, grave novamente detalhando a ocorrência.")
                 else:
                     prompt = f"""Analise o relato do técnico e extraia em formato JSON exatamente com as chaves:
                     - tipo_servico (Estritamente: 'Elétrico', 'Mecânico' ou 'Resina'. Se não se enquadrar, coloque 'Não informada')
                     - setor (Inicie com letra maiúscula)
-                    - equipamento (Inicie com letra maiúscula)
+                    - equipamento (Inicie com letra maiúscula. Se houver relação com estes cadastrados: {EQUIPAMENTOS_CADastrados}, padronize para o nome correto mais próximo)
                     - falha (Escreva formalmente, iniciando com letra maiúscula)
                     - causa (Se o técnico mencionou a causa, preencha formatando corretamente. Senão, coloque 'Não informada')
                     - acao (Escreva formalmente, iniciando com letra maiúscula)
@@ -152,6 +211,7 @@ if raw_key:
                         nova_os = {
                             "Nº O.S.": f"OS-{num_os:03d}",
                             "Data/Hora": agora,
+                            "Técnico": tecnico_nome.strip(),
                             "Tipo de Serviço": dados.get("tipo_servico", "Não informada"),
                             "Setor / Área": dados.get("setor", "Não informada"),
                             "Equipamento": dados.get("equipamento", "Não informada"),
@@ -165,7 +225,7 @@ if raw_key:
                         df_nova = pd.DataFrame([nova_os])
                         salvar_excel_seguro(df_nova, arquivo_excel)
                         
-                        st.success("✅ Relatório 100% completo! Salvo no Excel com sucesso.")
+                        st.success("✅ Relatório completo! Salvo no Excel e sincronizado com o Google Drive.")
                         st.balloons()
                         import time
                         time.sleep(2)
@@ -208,8 +268,8 @@ if raw_key:
                 transcript2 = client.audio.transcriptions.create(model="whisper-large-v3", file=audio_resposta)
                 texto_resp2 = transcript2.text.strip()
                 
-                if len(texto_resp2) < 3:
-                    st.error("⚠️ Resposta vazia detectada. Por favor, grave o complemento novamente.")
+                if len(texto_resp2) < 2:
+                    st.error("⚠️ Resposta complementar vazia. Por favor, grave novamente.")
                 else:
                     prompt_final = f"""
                     JSON original: {json.dumps(st.session_state.dados_parciais)}
@@ -240,6 +300,7 @@ if raw_key:
                     nova_os = {
                         "Nº O.S.": f"OS-{num_os:03d}",
                         "Data/Hora": agora,
+                        "Técnico": tecnico_nome.strip(),
                         "Tipo de Serviço": dados_finais.get("tipo_servico", "Não informada"),
                         "Setor / Área": dados_finais.get("setor", "Não informada"),
                         "Equipamento": dados_finais.get("equipamento", "Não informada"),
@@ -253,7 +314,7 @@ if raw_key:
                     df_nova = pd.DataFrame([nova_os])
                     salvar_excel_seguro(df_nova, arquivo_excel)
                     
-                    st.success("✅ Ordem de serviço finalizada e salva com sucesso no Excel!")
+                    st.success("✅ Ordem de serviço finalizada, salva no Excel e enviada ao Google Drive!")
                     st.balloons()
                     
                     import time
@@ -291,4 +352,4 @@ if raw_key:
         st.write("Nenhuma O.S. gravada ainda.")
 
 else:
-    st.warning("⚠️ Insira a sua chave de API da Groq na barra lateral ou nos Secrets para começar.")
+    st.warning("⚠️ Insira a sua chave de API da Groq na barra lateral para começar.")
